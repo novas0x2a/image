@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/containers/image/docker/reference"
 	"github.com/containers/image/image"
@@ -42,22 +44,45 @@ func (i *Image) SourceRefFullName() string {
 // GetRepositoryTags list all tags available in the repository. Note that this has no connection with the tag(s) used for this specific image, if any.
 func (i *Image) GetRepositoryTags(ctx context.Context) ([]string, error) {
 	path := fmt.Sprintf(tagsPath, reference.Path(i.src.ref.ref))
-	// FIXME: Pass the context.Context
-	res, err := i.src.c.makeRequest(ctx, "GET", path, nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		// print url also
-		return nil, errors.Errorf("Invalid status code returned when fetching tags list %d", res.StatusCode)
-	}
+
+	tags := make([]string, 0)
 	type tagsRes struct {
 		Tags []string
 	}
-	tags := &tagsRes{}
-	if err := json.NewDecoder(res.Body).Decode(tags); err != nil {
-		return nil, err
+	tagsHolder := &tagsRes{}
+
+	for {
+		res, err := i.src.c.makeRequest(ctx, "GET", path, nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		defer res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			// print url also
+			return nil, errors.Errorf("Invalid status code returned when fetching tags list %d", res.StatusCode)
+		}
+		if err := json.NewDecoder(res.Body).Decode(tagsHolder); err != nil {
+			return nil, err
+		}
+		tags = append(tags, tagsHolder.Tags...)
+
+		if link := res.Header.Get("Link"); link != "" {
+			linkURLStr := strings.Trim(strings.Split(link, ";")[0], "<>")
+			linkURL, err := url.Parse(linkURLStr)
+			if err != nil {
+				return tags, err
+			}
+
+			// can be relative or absolute, but we only want the path (and I
+			// guess we're in trouble if it forwards to a new place...)
+			path = linkURL.Path
+			if linkURL.RawQuery != "" {
+				path += "?"
+				path += linkURL.RawQuery
+			}
+			continue
+		}
+		break
 	}
-	return tags.Tags, nil
+	return tags, nil
 }
